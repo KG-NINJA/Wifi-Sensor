@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>Presence Observer</title>
+<!-- Observes only execution instability (timing + fetch jitter); does not detect beings or signals beyond the browser. -->
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "IBM Plex Mono", "Menlo", monospace;
+    background:#030508;
+    --glow:#4de6c8;
+    --accent:#9e6dff;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#030508;
+    color:#d9fff2;
+    overflow:hidden;
+    flex-direction:column;
+    gap:1.5rem;
+  }
+  #frame {
+    width:min(85vw,760px);
+    aspect-ratio:1/1;
+    border:1px solid rgba(77,230,200,0.35);
+    box-shadow:0 0 18px rgba(77,230,200,0.4), inset 0 0 28px rgba(0,0,0,0.9);
+    position:relative;
+    overflow:hidden;
+  }
+  canvas {
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    display:block;
+  }
+  #chant {
+    position:absolute;
+    right:1.2rem;
+    bottom:1.2rem;
+    display:flex;
+    flex-direction:column;
+    align-items:flex-end;
+    justify-content:flex-end;
+    gap:0.15rem;
+    text-align:right;
+    pointer-events:none;
+    letter-spacing:0.15rem;
+    transition:opacity 2s ease, transform 2s ease, letter-spacing 2s ease;
+    opacity:0.7;
+  }
+  #chant.disturb {
+    opacity:1;
+    letter-spacing:0.25rem;
+    animation:softpulse 6s ease-in-out infinite;
+  }
+  #frame.surge #chant {
+    animation:surgepulse 2.5s ease-in-out infinite;
+    letter-spacing:0.35rem;
+  }
+  #chant.silent {
+    opacity:0.45;
+  }
+  #mainword { font-size:1.05rem; }
+  #subword { font-size:0.75rem; color:#99c9bb; }
+  .scan {
+    position:absolute;
+    inset:0;
+    background-image:linear-gradient(transparent 96%, rgba(255,255,255,0.06));
+    mix-blend-mode:screen;
+    animation:flicker 7s linear infinite;
+    pointer-events:none;
+  }
+  @keyframes softpulse {
+    0%,100% { text-shadow:0 0 6px rgba(77,230,200,0.4); }
+    50% { text-shadow:0 0 18px rgba(158,109,255,0.8); }
+  }
+  @keyframes flicker {
+    0% { opacity:0.04; }
+    40% { opacity:0.08; }
+    70% { opacity:0.025; }
+    100% { opacity:0.05; }
+  }
+  #control {
+    display:flex;
+    align-items:center;
+    gap:0.6rem;
+    color:#7ea195;
+    letter-spacing:0.3rem;
+    font-size:0.85rem;
+    text-transform:uppercase;
+  }
+  #control span {
+    color:#cde5dc;
+  }
+  #sensitivity {
+    -webkit-appearance:none;
+    appearance:none;
+    width:200px;
+    height:2px;
+    background:rgba(77,230,200,0.4);
+    border:none;
+    outline:none;
+  }
+  #sensitivity::-webkit-slider-thumb {
+    -webkit-appearance:none;
+    width:14px;
+    height:14px;
+    border-radius:50%;
+    background:#9e6dff;
+    box-shadow:0 0 8px rgba(158,109,255,0.8);
+  }
+  #sensitivity::-moz-range-thumb {
+    width:14px;
+    height:14px;
+    border:none;
+    border-radius:50%;
+    background:#9e6dff;
+    box-shadow:0 0 8px rgba(158,109,255,0.8);
+  }
+  @keyframes surgepulse {
+    0%,100% { text-shadow:0 0 16px rgba(158,109,255,0.6); transform:scale(1); }
+    50% { text-shadow:0 0 30px rgba(255,255,255,0.9); transform:scale(1.08); }
+  }
+</style>
+</head>
+<body>
+<div id="frame">
+  <canvas id="field"></canvas>
+  <div id="chant" class="silent">
+    <div id="mainword">静寂</div>
+    <div id="subword">無反応</div>
+  </div>
+  <div class="scan"></div>
+</div>
+<div id="control" aria-label="感度調整">
+  <span>sense</span>
+  <input type="range" id="sensitivity" min="0.6" max="1.4" step="0.01" value="1">
+  <span>min←</span><span>→max</span>
+</div>
+<script>
+  const canvas = document.getElementById('field');
+  const ctx = canvas.getContext('2d');
+  const frame = document.getElementById('frame');
+  const chant = document.getElementById('chant');
+  const mainword = document.getElementById('mainword');
+  const subword = document.getElementById('subword');
+  const sensitivity = document.getElementById('sensitivity');
+
+  const pairings = [
+    { main: '静寂', sub: '無反応' },
+    { main: '干渉', sub: '……気配' },
+    { main: '静寂', sub: '静かに' },
+    { main: '干渉', sub: '薄い揺らぎ' },
+    { main: '静寂', sub: '沈む波' }
+  ];
+
+  let scale = window.devicePixelRatio || 1;
+  let lastTime = performance.now();
+  let jitter = 0;
+  let lag = 0;
+  let presence = 0;
+  let senseFactor = 1;
+
+  sensitivity.addEventListener('input', () => {
+    senseFactor = parseFloat(sensitivity.value);
+  });
+
+  function resize() {
+    const { width, height } = canvas.getBoundingClientRect();
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Measures animation frame irregularity only; higher deviation implies local execution jitter.
+  function animate(time) {
+    const delta = time - lastTime;
+    lastTime = time;
+    const deviation = Math.abs(delta - 16.67);
+    jitter = lerp(jitter, deviation, 0.08);
+
+    presence = clamp(
+      jitter / (12 * senseFactor) + lag / (250 * senseFactor),
+      0,
+      1
+    );
+    draw(time, presence);
+    updateChant(presence);
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // Fetches this document occasionally; longer latency nudges disturbance.
+  async function probe() {
+    const start = performance.now();
+    try {
+      await fetch(window.location.href, { cache: 'no-store' });
+      lag = lerp(lag, performance.now() - start, 0.3);
+    } catch (err) {
+      lag = lerp(lag, 220, 0.2);
+    }
+    setTimeout(probe, 4000 + Math.random() * 4000);
+  }
+  probe();
+
+  function draw(time, intensity) {
+    const w = canvas.width / scale;
+    const h = canvas.height / scale;
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+
+    const rings = 7;
+    const surgeBoost = ease(clamp((intensity - 0.7) * 3, 0, 1));
+    for (let i = 0; i < rings; i++) {
+      const r = (Math.min(w, h) * 0.35) * (0.2 + i / rings);
+      const wobble = Math.sin(time * 0.0004 + i) * (6 + intensity * 25 + surgeBoost * 40);
+      ctx.strokeStyle = i % 2 === 0 ? `rgba(77,230,200,${0.3 + intensity * 0.4 + surgeBoost * 0.3})` : `rgba(158,109,255,${0.25 + intensity * 0.4 + surgeBoost * 0.3})`;
+      ctx.lineWidth = 1 + intensity * 1.5 + surgeBoost * 2.2;
+      ctx.shadowColor = surgeBoost > 0 ? '#ffffff' : '#4de6c8';
+      ctx.shadowBlur = 10 + intensity * 30 + surgeBoost * 35;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r + wobble * 0.1, r * 0.6 + Math.sin(i + time * 0.0002) * intensity * 12, Math.sin(i), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    const chords = 32;
+    ctx.lineWidth = 0.8 + surgeBoost * 0.6;
+    ctx.shadowBlur = 12 + surgeBoost * 15;
+    for (let c = 0; c < chords; c++) {
+      const phase = (c / chords) * Math.PI * 2;
+      const base = c % 3 === 0 ? 0.35 : 0.25;
+      ctx.strokeStyle = c % 3 === 0 ? `rgba(255,255,255,${base + surgeBoost * 0.4})` : `rgba(77,230,200,${base + surgeBoost * 0.4})`;
+      ctx.beginPath();
+      for (let t = -0.5; t <= 0.5; t += 0.05) {
+        const radius = Math.min(w, h) * (0.15 + t * 0.5);
+        const x = Math.cos(phase + t * 4 + time * 0.0005) * radius;
+        const y = Math.sin(phase * 1.4 + time * 0.0003) * radius;
+        const flicker = Math.sin(time * 0.002 + c * 13) * (intensity * 6 + surgeBoost * 14);
+        const nx = x + flicker;
+        const ny = y - flicker * 0.3;
+        if (t === -0.5) ctx.moveTo(nx, ny);
+        else ctx.lineTo(nx, ny);
+      }
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    if (surgeBoost > 0) {
+      frame.classList.add('surge');
+    } else {
+      frame.classList.remove('surge');
+    }
+  }
+
+  function updateChant(level) {
+    if (level > 0.45) {
+      chant.classList.remove('silent');
+      chant.classList.add('disturb');
+      const choice = pairings[Math.floor(Math.random() * pairings.length)];
+      mainword.textContent = choice.main;
+      subword.textContent = choice.sub;
+    } else if (level < 0.18) {
+      chant.classList.remove('disturb');
+      chant.classList.add('silent');
+      mainword.textContent = '静寂';
+      subword.textContent = '無反応';
+    }
+  }
+
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const ease = x => x * x * (3 - 2 * x);
+</script>
+</body>
+</html>
